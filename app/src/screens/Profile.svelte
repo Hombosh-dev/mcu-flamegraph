@@ -4,10 +4,9 @@
   import RunSettingsPanel from '../components/RunSettings.svelte';
   import Setup from '../components/Setup.svelte';
   import TopBar from '../components/TopBar.svelte';
-  import { accessProblem, boardDetail } from '../lib/boards';
-  import { boardTitle } from '../lib/projects';
+  import { accessProblem, boardDetail, boardFamily } from '../lib/boards';
   import type { Sidecar } from '../lib/sidecar';
-  import type { BoardPort, BoardsInfo, Method, Probe, ProjectMeta, RunMeta, RunSettings } from '../lib/types';
+  import type { Device, DevicesInfo, Method, Probe, ProjectMeta, RunMeta, RunSettings } from '../lib/types';
 
   interface Props {
     sidecar: Sidecar;
@@ -17,7 +16,7 @@
   }
   let { sidecar, project, onBack, onRun }: Props = $props();
 
-  type Tile = BoardPort & {
+  type Tile = Device & {
     probe: Probe | null;
     error: string;
     chip: string;
@@ -28,7 +27,7 @@
 
   let step = $state<'board' | 'mode' | 'process'>('board');
   let tiles = $state<Tile[]>([]);
-  let probes = $state<BoardsInfo['probes']>([]);
+  let probes = $state<Device[]>([]);
   let scanned = $state(false);
   let chosen = $state<Tile | null>(null);
   let lines = $state<string[]>([]);
@@ -46,15 +45,23 @@
     scanned = false;
     error = '';
     try {
-      const info = await sidecar.call<BoardsInfo>('boards');
+      const info = await sidecar.call<DevicesInfo>('devices');
       if (mine !== scanId) return;
-      probes = info.probes;
-      tiles = info.ports.map((p) => ({ ...p, probe: null, error: '', chip: '', identifying: false, granting: false, grantError: '' }));
+      const previousId = chosen?.id;
+      probes = info.devices.filter((d) => d.kind === 'probe');
+      tiles = info.devices
+        .filter((d) => d.kind === 'serial')
+        .map((d) => ({ ...d, probe: null, error: '', chip: '', identifying: false, granting: false, grantError: '' }));
+      if (previousId) {
+        const match = tiles.find((t) => t.id === previousId) ?? null;
+        if (match) chosen = match;
+        else if (step === 'board') chosen = null;
+      }
       scanned = true;
       for (const tile of tiles) {
         if (!tile.access.ok) continue;
         try {
-          const probe = await sidecar.call<Probe>('probe', { port: tile.port, project: project.id });
+          const probe = await sidecar.call<Probe>('probe', { device: tile.id, project: project.id });
           if (mine === scanId) tile.probe = probe;
         } catch (e) {
           if (mine === scanId) tile.error = String(e instanceof Error ? e.message : e);
@@ -72,12 +79,12 @@
     if (lines.length > 200) lines.splice(0, lines.length - 200);
   }));
 
-  // One system password prompt (pkexec) gives this user the port; then the boards are looked at again.
+  // Asks the engine to grant port access, then rescans the boards.
   async function grant(tile: Tile) {
     tile.granting = true;
     tile.grantError = '';
     try {
-      const result = await sidecar.call<{ ok_now: boolean; relogin: boolean }>('grant_access', { port: tile.port });
+      const result = await sidecar.call<{ ok_now: boolean; relogin: boolean }>('grant_access', { device: tile.id });
       // ok_now false: only the group part worked (no `setfacl`), and a group applies from the next login
       notice = !result.ok_now
         ? `You were added to the group "${tile.access.group}". Log out and in, then press Rescan.`
@@ -95,7 +102,7 @@
     tile.identifying = true;
     tile.chip = '';
     try {
-      tile.chip = (await sidecar.call<{ chip: string }>('chip_id', { port: tile.port })).chip;
+      tile.chip = (await sidecar.call<{ chip: string }>('chip_id', { device: tile.id })).chip;
     } catch (e) {
       tile.chip = String(e instanceof Error ? e.message : e);
     }
@@ -115,6 +122,7 @@
   const methods = $derived(
     order.map((id) => chosen?.probe?.methods.find((m) => m.id === id) ?? { id, available: false, why: 'unknown' })
   );
+  const chosenLine = $derived(chosen ? [chosen.title, boardDetail(chosen) || chosen.name].filter(Boolean).join(' · ') : '');
 
   function choose(tile: Tile) {
     chosen = tile;
@@ -145,7 +153,7 @@
         building = true;
         lines = [];
       }
-      const { run } = await sidecar.call<{ run: RunMeta }>(mode, { project: project.id, port: chosen.port, name: args.runName, settings: args.settings });
+      const { run } = await sidecar.call<{ run: RunMeta }>(mode, { project: project.id, device: chosen.id, name: args.runName, settings: args.settings });
       onRun(run, true);
     } catch (e) {
       error = String(e instanceof Error ? e.message : e);
@@ -185,13 +193,15 @@
       {#if notice}<p class="notice" role="status">{notice}</p>{/if}
 
       <div class="tiles">
-        {#each tiles as tile (tile.port)}
+        {#each tiles as tile (tile.id)}
+          {@const family = boardFamily(tile, tile.probe)}
           <div class="tile" class:wait={tile.access.ok && !tile.probe && !tile.error} class:denied={!tile.access.ok}>
-            <button class="pick" disabled={!tile.probe || !tile.access.ok} onclick={() => choose(tile)} aria-label={`Use ${boardTitle(tile)} on ${tile.port}`}>
+            <button class="pick" disabled={!tile.probe || !tile.access.ok} onclick={() => choose(tile)} aria-label={`Use ${tile.title || tile.name} on ${tile.name}`}>
               <span class="chipicon" aria-hidden="true">▦</span>
               <span class="t">
-                <b>{boardTitle(tile)}</b>
-                <span class="muted">{tile.port}</span>
+                <b>{tile.title || tile.name}</b>
+                {#if family}<span class="family" class:muted={family.tentative}>{family.text}</span>{/if}
+                <span class="muted">{tile.name}</span>
                 {#if boardDetail(tile)}<span class="muted detail">{boardDetail(tile)}</span>{/if}
               </span>
               <span class="status">
@@ -203,7 +213,7 @@
                 {:else}No malgrind agent detected{/if}
               </span>
             </button>
-            {#if !tile.access.ok}
+            {#if !tile.access.ok && tile.access.fixable}
               <div class="grant">
                 <button class="btn small" onclick={() => grant(tile)} disabled={tile.granting}>{tile.granting ? 'Waiting for your password…' : 'Grant access…'}</button>
                 <span class="muted small">asks for your password once, in the system's own window</span>
@@ -219,11 +229,11 @@
             {/if}
           </div>
         {/each}
-        {#each probes as probe}
+        {#each probes as probe (probe.id)}
           <div class="tile off" aria-disabled="true">
             <div class="pick">
               <span class="chipicon" aria-hidden="true">⌁</span>
-              <span class="t"><b>{probe.name}</b><span class="muted">debug probe</span></span>
+              <span class="t"><b>{probe.title || probe.name}</b><span class="muted">debug probe</span></span>
               <span class="status">Found. Profiling through a probe is in development.</span>
             </div>
           </div>
@@ -234,7 +244,7 @@
   {:else if step === 'mode' && chosen}
     <section>
       <h1>How do you want to look at it?</h1>
-      <p class="muted">{[boardTitle(chosen), chosen.port, boardDetail(chosen)].filter(Boolean).join(' · ')}</p>
+      <p class="muted">{chosenLine}</p>
       <div class="cards">
         {#each methods as m (m.id)}
           <button class="card" class:off={!m.available} class:picked={m.id === setting} disabled={!m.available} onclick={() => pick(m)}>
@@ -250,9 +260,9 @@
           <RunSettingsPanel
             {sidecar}
             {project}
-            port={chosen.port}
+            device={chosen.id}
             mode={setting}
-            boardLine={[boardTitle(chosen), chosen.port, boardDetail(chosen)].filter(Boolean).join(' · ')}
+            boardLine={chosenLine}
             onStart={start}
             onCancel={() => (setting = null)}
           />
@@ -290,6 +300,7 @@
   .chipicon { font-size: 34px; color: var(--accent); line-height: 1; }
   .t { display: flex; flex-direction: column; }
   .t b { font-size: 16px; }
+  .family { font-size: 12.5px; margin-top: 2px; }
   .status { font-size: 12.5px; color: var(--muted); }
   .good { color: var(--live); }
   .bad { color: var(--danger); }

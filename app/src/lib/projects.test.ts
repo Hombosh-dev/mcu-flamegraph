@@ -36,8 +36,9 @@ describe('labels', () => {
     expect(sourceLabel({ source: 'git' })).toBe('GitHub');
     expect(sourceLabel({ source: 'none' })).toBe('No code');
   });
-  it('titles a tile by its adapter, never by a chip it cannot know', () => {
-    expect(boardTitle({ adapter: 'WCH CH340/CH343 USB-UART' })).toBe('WCH CH340/CH343 USB-UART');
-    expect(boardTitle({ adapter: '' })).toBe('Serial port');
+  it('titles a tile by its device title or name, never by a chip it cannot know', () => {
+    expect(boardTitle({ title: 'WCH CH340/CH343 USB-UART', name: 'usbserial-1' })).toBe('WCH CH340/CH343 USB-UART');
+    expect(boardTitle({ title: '', name: 'usbserial-1' })).toBe('usbserial-1');
+    expect(boardTitle({ title: '', name: '' })).toBe('Serial device');
   });
 });

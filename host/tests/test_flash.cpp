@@ -1,6 +1,8 @@
 // Safe flash self-check: the backup taken before the agent goes on, the restore, and the list of methods.
 // pio and esptool are shell scripts that log their command line, so no board is needed.
 #include "backup.hpp"
+#include "families/esp32.hpp"
+#include "families/family.hpp"
 #include "ops.hpp"
 #include "plan.hpp"
 #include "pty.hpp"
@@ -214,24 +216,51 @@ void restore_writes_the_backup_back() {
     assert(contains(calls, "write_flash --flash_mode keep --flash_freq keep --flash_size keep 0 " + saved.string()));
 }
 
+class ProbeOnlyFamily final : public Family {
+public:
+    [[nodiscard]] std::string_view id() const override { return "probe-only"; }
+    [[nodiscard]] std::string_view name() const override { return "Probe-only MCU"; }
+    [[nodiscard]] FamilyCaps caps() const override { return {.agent = false}; }
+    [[nodiscard]] bool handles_arch(malgrind::Arch) const override { return false; }
+    [[nodiscard]] std::string project_problem(const ProjectInfo&, const std::string&) const override { return {}; }
+    [[nodiscard]] unsigned agent_baud() const override { return 0; }
+    [[nodiscard]] AgentCommands agent_commands(const ToolContext&, const ProjectInfo&, const std::string&,
+                                               const std::string&, const RunSettings&, bool) const override {
+        return {};
+    }
+    [[nodiscard]] std::vector<std::string> addr2line_names(malgrind::Arch) const override { return {}; }
+};
+
 void methods_say_what_is_missing() {
     const auto find = [](const std::vector<Method>& list, std::string_view id) {
         return *std::ranges::find_if(list, [&](const Method& m) { return m.id == id; });
     };
-    auto m = methods({.agent = true}, true, "");
+    const Family& esp = esp32_family();
+    auto m = methods({.agent = true}, &esp, true, "");
     assert(find(m, "attach").available && find(m, "attach").why.empty() && find(m, "new_run").available);
     assert(!find(m, "no_flash").available && contains(find(m, "no_flash").why, "debug probe"));
 
-    m = methods({}, false, ""); // nothing running, no PlatformIO
+    m = methods({}, &esp, false, ""); // nothing running, no PlatformIO
     assert(!find(m, "attach").available && contains(find(m, "attach").why, "no malgrind agent"));
     assert(!find(m, "new_run").available && contains(find(m, "new_run").why, "PlatformIO"));
 
-    m = methods({}, true, "environment 'x' uses framework 'arduino'");
+    m = methods({}, nullptr, true, ""); // no matching family
+    assert(!find(m, "new_run").available && contains(find(m, "new_run").why, "family") && !contains(find(m, "new_run").why, "ESP32"));
+
+    ProbeOnlyFamily no_agent;
+    m = methods({}, &no_agent, true, ""); // family does not support agent builds
+    assert(!find(m, "new_run").available && contains(find(m, "new_run").why, "Probe-only MCU") && !contains(find(m, "new_run").why, "ESP32"));
+
+    m = methods({}, nullptr, true, "environment 'x' uses framework 'arduino'");
     assert(!find(m, "new_run").available && contains(find(m, "new_run").why, "arduino"));
 
-    m = methods({.busy = true}, true, ""); // somebody else has the port
+    m = methods({.busy = true}, &esp, true, ""); // somebody else has the port
     assert(!find(m, "attach").available && contains(find(m, "attach").why, "busy"));
     assert(!find(m, "new_run").available && contains(find(m, "new_run").why, "busy"));
+
+    m = methods({.denied = true}, &esp, true, "");
+    assert(!find(m, "attach").available && contains(find(m, "attach").why, "Grant access"));
+    assert(!find(m, "new_run").available && contains(find(m, "new_run").why, "Grant access"));
 }
 
 } // namespace

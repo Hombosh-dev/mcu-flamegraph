@@ -1,4 +1,5 @@
 // Run settings self-check: the command-line splitter, and how settings turn into the commands of a run.
+#include "families/family.hpp"
 #include "plan.hpp"
 #include "settings.hpp"
 
@@ -46,7 +47,9 @@ struct World {
         std::ofstream(project / "platformio.ini") << "[env:a]\n[env:b]\n";
     }
     ~World() { fs::remove_all(root); }
-    [[nodiscard]] Prepared prepared() const { return {"/opt/pio", ProjectInfo{project, {"a", "b"}, "a"}, "a", "/dev/ttyUSB0"}; }
+    [[nodiscard]] Prepared prepared() const {
+        return {"/opt/pio", ProjectInfo{project, {"a", "b"}, "a"}, "a", "/dev/ttyUSB0", family_by_id("esp32")};
+    }
 };
 const fs::path kAgent = MALGRIND_SOURCE_DIR;
 
@@ -54,8 +57,9 @@ void defaults_are_the_detected_commands() {
     World w;
     const auto p = w.prepared();
     const auto plan = make_plan(p, kAgent, {});
-    const auto build = agent_command(p.pio, p.project, "a", p.port, kAgent, false), upload = agent_command(p.pio, p.project, "a", p.port, kAgent, true);
-    assert(plan.build.argv == build.argv && plan.build.env == build.env && plan.upload.argv == upload.argv && plan.upload.env == upload.env);
+    const auto cmds = p.family->agent_commands(ToolContext{{}, p.pio, kAgent}, p.project, "a", p.port, {}, false);
+    assert(plan.build.argv == cmds.build.argv && plan.build.env == cmds.build.env &&
+           plan.upload.argv == cmds.upload.argv && plan.upload.env == cmds.upload.env && plan.elf == cmds.elf);
     assert(!has_env_starting(plan.build, "MALGRIND_RATE_HZ") && !has_env_starting(plan.build, "PLATFORMIO_BUILD_FLAGS")); // nothing is added
     assert(contains(plan.build_text, "pio run -d '" + w.project.string() + "' -e a") && !contains(plan.build_text, "upload"));
     assert(contains(plan.upload_text, "-t upload --upload-port /dev/ttyUSB0"));

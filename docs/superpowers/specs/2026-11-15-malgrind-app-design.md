@@ -17,7 +17,7 @@ No tight deadline; everything below is expected before the defense.
 ## 2. Goals, non-goals, anti-goals
 
 **Goals**
-- A packaged app for Linux (`.deb`) and macOS (`.dmg`, built in CI, verified by the user on a Mac).
+- A packaged app for Linux (`.deb`), macOS (`.dmg`, built in CI, verified by the user on a Mac), and Windows (`.exe` installer built by CI, verified by the user).
 - Live-profile a program that is already running on the board, without resetting it (attach).
 - Four analyses, all live and all replayable from history: callgrind-like, massif-like, FreeRTOS tasks, memcheck-like.
 - History with summary, time scrubbing, diff of two runs, name and notes, export.
@@ -27,7 +27,7 @@ No tight deadline; everything below is expected before the defense.
   Heap checking costs more and the UI says so.
 
 **Non-goals (this version)**
-- Windows; any MCU except ESP32 classic (the core and port structure stay chip-neutral, no new ports now).
+- Any MCU except ESP32 classic (the core and port structure stay chip-neutral, no new ports now).
 - QEMU emulation. (JTAG/SWD probe attach moved from here to a planned stage, section 5a.)
 - Own build system or flasher: building and flashing is PlatformIO's job (`pio`).
 - Several boards at once; a background daemon (closing the window ends the run); cloud or sharing.
@@ -137,6 +137,19 @@ that already runs the agent is not backed up again (the image would be ours), re
 agent. Not supported: patching an agent into a dumped image (needs the binary's symbols, free IRAM, no flash
 encryption; fragile), and profiling a board that has neither source nor a probe.
 
+## 5b. Devices and families (added 2026-11-18)
+
+**One OS layer.** Every OS-specific call lives in `host/src/os/`. Outside it: no OS macros (`#ifdef _WIN32/__APPLE__/__linux__`), POSIX or Win32 headers, `/dev/`, `/sys/`, `errno`, or `getenv`. This boundary is enforced by `scripts/check-portability.mjs`.
+
+**Devices, not ports.** The UI and the protocol select a **device** by a stable, OS-neutral **device id** (`usb-1a86-7523-sn-5A7B0123`), never by parsing an OS path. The engine resolves the id to the current OS path (`/dev/ttyUSB0`, `/dev/cu.usbserial-1410`, `COM5`) at open time, and again after an upload. Device-id rules, in order:
+- USB with serial: `usb-<vid>-<pid>-sn-<serial>`
+- USB with location: `usb-<vid>-<pid>-at-<location>`
+- Otherwise: `port-<name>`
+- Debug probes use the `probe-` prefix instead of `usb-` (`probe-<vid>-<pid>-sn-<serial>` or `probe-<vid>-<pid>-at-<location>`).
+- Characters outside `[a-z0-9.-]` become `-`, lower-cased, max 96 chars.
+
+**Families, not ESP32.** Everything chip-specific (which PlatformIO platforms/frameworks are supported, how the agent is injected, how flash is backed up and restored, how the chip is identified, the agent's baud rate, `addr2line` tool names, and OpenOCD configs) sits behind one C++ interface `Family` in `host/src/families/`. ESP32 is the first implementation; STM32 and RP2040 are later files, not edits across the engine.
+
 ## 6. Flows
 
 (Reworked 2026-11-16 after the user's own sketch. Vocabulary: a **project** is a container, its source code is optional.)
@@ -245,11 +258,7 @@ used) for the flamegraph, **uPlot** for time series. The builder may swap these 
 ## 12. Staging (all before the defense)
 
 1. Done (0.1.0): rename; sidecar `serve` protocol; run store and replay; Tauri shell; start screen, history, live flamegraph and Functions; New run, attach, remove agent; `.deb`, `.dmg` in CI.
-2. 2a, safe flash and methods report (section 5a; ESP32, no new hardware).
-3. 2b, probe spike on Cortex-M (rate, DWT_PCSR without halting through OpenOCD), then `OpenOcdSource`; 2c ESP32 over JTAG; 2d Cortex-M agent; `Source` becomes an interface here.
-4. Agent v2: beacon, start/stop, heap stats, task stats, Memory and Tasks tabs.
-5. Allocation hooks and error events, Memcheck tab.
-6. Diff, export, polish, README and the C++ share check. The UI is redesigned once, after 2a.
+2. Stage 2+ roadmap and tasks: see `docs/superpowers/plans/2026-11-18-malgrind-stage2-crossplatform.md`.
 
 ## 13. Calls I made (please check)
 

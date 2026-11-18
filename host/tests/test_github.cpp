@@ -1,10 +1,11 @@
 // GitHub link parsing and cloning, with a fake `git` on PATH.
+#include "env.hpp"
 #include "github.hpp"
 #include "ops.hpp"
+#include "os/paths.hpp"
 
 #include <cassert>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -40,27 +41,28 @@ void refuses_everything_else() {
 
 struct FakeGit {
     fs::path root = fs::canonical(fs::temp_directory_path()) / "malgrind_github";
+    ScopedEnv save_path{"PATH"};
+    ScopedEnv save_log{"FAKE_LOG"};
+    ScopedEnv save_git{"FAKE_GIT", std::nullopt};
     FakeGit() {
         fs::remove_all(root);
         fs::create_directories(root / "bin");
-        std::ofstream(root / "bin/git") << R"(#!/bin/sh
-echo "git $*" >> "$FAKE_LOG"
-echo "prompt=$GIT_TERMINAL_PROMPT" >> "$FAKE_LOG"
-for last; do :; done   # the destination is the last argument
-[ "$FAKE_GIT" = fail ] && { echo "fatal: repository not found" >&2; exit 128; }
-mkdir -p "$last"
-echo "Cloning into '$last'..."
-[ "$FAKE_GIT" = nopio ] && { echo readme > "$last/README.md"; exit 0; }
-mkdir -p "$last/firmware/x" && printf '[env:a]\n' > "$last/firmware/x/platformio.ini"
-exit 0
-)";
-        fs::permissions(root / "bin/git", fs::perms::owner_exec | fs::perms::owner_read, fs::perm_options::add);
-        setenv("PATH", (root / "bin").string().append(":/usr/bin:/bin").c_str(), 1); // the fake git first
-        setenv("FAKE_LOG", (root / "log").c_str(), 1);
-        unsetenv("FAKE_GIT");
+        fs::copy_file(MALGRIND_FAKE_TOOL, root / "bin" / os::exe_name("git"), fs::copy_options::overwrite_existing);
+        os::set_env("PATH", path_with(root / "bin")); // the fake git first
+        os::set_env("FAKE_LOG", os::to_utf8(root / "log"));
     }
     ~FakeGit() { fs::remove_all(root); }
 };
+
+void path_with_checks() {
+    ScopedEnv save_path("PATH", std::nullopt);
+    const fs::path bin = "/tmp/malgrind_bin";
+    assert(path_with(bin) == os::to_utf8(bin));
+    os::set_env("PATH", "");
+    assert(path_with(bin) == os::to_utf8(bin));
+    os::set_env("PATH", "/usr/bin");
+    assert(path_with(bin) == os::to_utf8(bin) + os::kPathListSep + "/usr/bin");
+}
 
 void clone_finds_the_project() {
     FakeGit fake;
@@ -70,13 +72,13 @@ void clone_finds_the_project() {
     assert(project == dest / "firmware/x" && fs::exists(project / "platformio.ini") && contains(lines, "Cloning into"));
     const auto log = slurp(fake.root / "log");
     // https only, shallow, never a password prompt, and the link comes after `--` so it can never be read as an option
-    assert(contains(log, "-c protocol.allow=never -c protocol.https.allow=always clone --depth 1 --progress -- https://github.com/o/r.git " + dest.string()));
+    assert(contains(log, "-c protocol.allow=never -c protocol.https.allow=always clone --depth 1 --progress -- https://github.com/o/r.git " + os::to_utf8(dest)));
     assert(contains(log, "prompt=0"));
 }
 
 void clone_without_platformio_ini_leaves_nothing() {
     FakeGit fake;
-    setenv("FAKE_GIT", "nopio", 1);
+    os::set_env("FAKE_GIT", "nopio");
     const auto dest = fake.root / "clone";
     bool threw = false;
     try {
@@ -89,7 +91,7 @@ void clone_without_platformio_ini_leaves_nothing() {
 
 void failed_clone_leaves_nothing() {
     FakeGit fake;
-    setenv("FAKE_GIT", "fail", 1);
+    os::set_env("FAKE_GIT", "fail");
     std::string lines;
     bool threw = false;
     try {
@@ -102,7 +104,7 @@ void failed_clone_leaves_nothing() {
 
 void missing_git_is_explained() {
     FakeGit fake;
-    setenv("PATH", "/nonexistent", 1);
+    os::set_env("PATH", os::to_utf8(fake.root / "nonexistent"));
     bool threw = false;
     try {
         (void)clone_project(*parse_github_url("https://github.com/o/r"), fake.root / "clone", [](std::string_view) {});
@@ -117,6 +119,7 @@ void missing_git_is_explained() {
 int main() {
     accepts_repository_links();
     refuses_everything_else();
+    path_with_checks();
     clone_finds_the_project();
     clone_without_platformio_ini_leaves_nothing();
     failed_clone_leaves_nothing();

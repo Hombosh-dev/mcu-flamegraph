@@ -1,5 +1,5 @@
 // Small pure helpers of the project screens (the engine stays the authority on every one of them).
-import type { BoardPort, ProjectMeta } from './types';
+import type { ProjectMeta } from './types';
 
 export type Drop = { kind: 'folder'; path: string } | { kind: 'elf'; path: string } | { kind: 'unsupported'; why: string };
 
@@ -24,6 +24,6 @@ export function sourceLabel(project: Pick<ProjectMeta, 'source'>): string {
 }
 
 // The title of a board tile. A USB adapter is not the chip, so it never claims one.
-export function boardTitle(board: Pick<BoardPort, 'adapter'>): string {
-  return board.adapter || 'Serial port';
+export function boardTitle(board: { title?: string; name?: string }): string {
+  return board.title || board.name || 'Serial device';
 }

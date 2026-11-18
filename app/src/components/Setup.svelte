@@ -60,9 +60,9 @@
             <span class="muted">found</span>
           {:else if info.python}
             <span class="muted">builds and flashes the firmware. malgrind downloads it from pypi.org into <code>~/.platformio</code>, no administrator rights needed.
-              The first build then downloads the ESP32 toolchain, about 1 GB.</span>
+              The first build then downloads the toolchain for your board, about 1 GB.</span>
           {:else}
-            <span class="muted">is not installed, and Python 3 is needed to install it (on Ubuntu: <code>sudo apt install python3 python3-venv</code>).</span>
+            <span class="muted">is not installed, and Python 3 is needed to install it ({info.python_hint}).</span>
           {/if}
         </div>
         {#if !info.pio}

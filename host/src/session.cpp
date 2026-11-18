@@ -20,7 +20,8 @@ using namespace std::chrono_literals;
 Session::Session(Emit emit, fs::path elf, fs::path project, bool search_elf)
     : emit_(std::move(emit)), elf_(std::move(elf)), project_(std::move(project)), search_elf_(search_elf) {}
 
-std::unique_ptr<Session> Session::live(Source source, RunWriter writer, fs::path elf, fs::path project, Emit emit) {
+std::unique_ptr<Session> Session::live(std::unique_ptr<ByteSource> source, RunWriter writer, fs::path elf,
+                                       fs::path project, Emit emit) {
     std::unique_ptr<Session> s(new Session(std::move(emit), std::move(elf), std::move(project), true));
     s->run_id_ = writer.meta().id;
     s->writer_.emplace(std::move(writer));
@@ -55,14 +56,14 @@ void Session::record(const std::function<void(RunWriter&)>& fn) {
     }
 }
 
-void Session::read_loop(Source source) {
+void Session::read_loop(std::unique_ptr<ByteSource> source) {
     const auto start = Clock::now();
     auto elapsed = [&] { return std::chrono::duration_cast<Aggregator::Ms>(Clock::now() - start); };
     std::array<std::uint8_t, 4096> buf;
     bool hinted = false;
     bool ended = false;
     while (!stop_) {
-        const auto n = source.read(buf);
+        const auto n = source ? source->read(buf) : std::nullopt;
         if (!n) {
             ended = true;
             break;

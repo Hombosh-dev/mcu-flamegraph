@@ -10,7 +10,7 @@
 
 namespace malgrind::host {
 
-inline constexpr unsigned kDefaultRateHz = 997; // prime: no aliasing with the RTOS tick (agent/esp32/malgrind/autostart.cpp)
+inline constexpr unsigned kDefaultRateHz = 997; // prime: no aliasing with the RTOS tick (matches the target agent default)
 inline constexpr unsigned kMinRateHz = 10, kMaxRateHz = 5000;
 
 struct RunSettings {

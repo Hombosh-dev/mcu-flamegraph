@@ -1,4 +1,4 @@
-# Push a tag v<VERSION> and this builds the Linux .deb and the macOS .dmg side by side, then publishes both as a GitHub Release.
+# Push a tag v<VERSION> and this builds the Linux .deb, macOS .dmg and Windows .exe installer side by side, then publishes them as a GitHub Release.
 #   node scripts/version.mjs set 0.2.0 && git commit -am "release 0.2.0" && git tag v0.2.0 && git push --follow-tags
 # A tag with a dash (v0.2.0-rc.1) becomes a pre-release.
 name: release
@@ -27,8 +27,9 @@ jobs:
       matrix:
         include:
           # 24.04: the engine needs GCC >= 13 (<format>), so the .deb needs Ubuntu 24.04 or newer
-          - { os: ubuntu-24.04, bundle: deb }
-          - { os: macos-latest, bundle: dmg } # Apple silicon
+          - { os: ubuntu-24.04, bundle: deb, ext: deb }
+          - { os: macos-latest, bundle: dmg, ext: dmg } # Apple silicon
+          - { os: windows-latest, bundle: nsis, ext: exe }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -68,20 +69,30 @@ jobs:
             dpkg-deb -I "$deb" | grep -q "Version: $version"
             dpkg-deb -x "$deb" /tmp/pkg
             /tmp/pkg/usr/bin/malgrind-cli --version | grep -q "$version"
+            test -f /tmp/pkg/usr/lib/malgrind/agent-src/agent/esp32/family.json
             test -f /tmp/pkg/usr/lib/malgrind/agent-src/agent/esp32/inject.py
-          else
+          elif [ "${{ matrix.bundle }}" = dmg ]; then
             dmg=$(ls "$bundle_dir"/*.dmg)
             hdiutil attach -nobrowse -readonly -mountpoint /tmp/dmg "$dmg"
             app=/tmp/dmg/malgrind.app
             "$app/Contents/MacOS/malgrind-cli" --version | grep -q "$version"
+            test -f "$app/Contents/Resources/agent-src/agent/esp32/family.json"
             test -f "$app/Contents/Resources/agent-src/agent/esp32/inject.py"
             hdiutil detach /tmp/dmg
+          else
+            setup=$(ls "$bundle_dir"/*.exe)
+            pkg_dir="$RUNNER_TEMP/malgrind-pkg"
+            rm -rf "$pkg_dir"
+            MSYS_NO_PATHCONV=1 "$setup" /S /D="$(cygpath -w "$pkg_dir")"
+            "$pkg_dir/malgrind-cli.exe" --version | grep -q "$version"
+            test -f "$pkg_dir/agent-src/agent/esp32/family.json"
+            test -f "$pkg_dir/agent-src/agent/esp32/inject.py"
           fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: malgrind-${{ matrix.bundle }}
-          path: app/src-tauri/target/release/bundle/${{ matrix.bundle }}/*.${{ matrix.bundle }}
+          path: app/src-tauri/target/release/bundle/${{ matrix.bundle }}/*.${{ matrix.ext }}
           if-no-files-found: error
 
   release:

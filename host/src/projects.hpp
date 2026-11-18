@@ -46,7 +46,7 @@ struct ProjectUpdate {
 class ProjectStore {
 public:
     explicit ProjectStore(std::filesystem::path root); // created if missing
-    // $XDG_DATA_HOME/malgrind/projects, else ~/.local/share/malgrind/projects; macOS: ~/.malgrind/projects (a path with no space)
+    // os::user_data_dir() / "malgrind/projects" (macOS: ~/.malgrind/projects, a path with no space)
     [[nodiscard]] static std::filesystem::path default_root();
 
     // Assigns id ("p-yyyymmdd-hhmmss", "-2"... on a clash) and `created`. `elf`: copied to <id>/firmware.elf (Origin::None).

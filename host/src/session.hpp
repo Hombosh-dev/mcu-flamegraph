@@ -29,8 +29,9 @@ class Session {
 public:
     // Reads `source` on a thread of its own until it ends or the session is destroyed. `elf` empty: look for the
     // firmware ELF under `project` when the first frame names the architecture; with no project, names stay raw addresses.
-    [[nodiscard]] static std::unique_ptr<Session> live(Source source, RunWriter writer, std::filesystem::path elf,
-                                                       std::filesystem::path project, Emit emit);
+    [[nodiscard]] static std::unique_ptr<Session> live(std::unique_ptr<ByteSource> source, RunWriter writer,
+                                                       std::filesystem::path elf, std::filesystem::path project,
+                                                       Emit emit);
     // A stored run, fully loaded before this returns. nullptr if there is no such run.
     [[nodiscard]] static std::unique_ptr<Session> replay(const RunStore& store, std::string_view id, Emit emit);
 
@@ -57,7 +58,7 @@ private:
     void notice(std::string text) const;
     // Runs fn on the writer. A failing disk (full, run deleted) ends recording with a notice; the live view goes on.
     void record(const std::function<void(RunWriter&)>& fn);
-    void read_loop(Source source);
+    void read_loop(std::unique_ptr<ByteSource> source);
 
     Emit emit_;
     std::filesystem::path elf_, project_;

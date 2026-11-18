@@ -1,13 +1,16 @@
 // PlatformIO integration self-check: project parsing, the sdkconfig merge, the build invocation and process output.
+#include "env.hpp"
+#include "families/esp32.hpp"
 #include "ops.hpp"
+#include "os/paths.hpp"
+#include "os/process.hpp"
+#include "os/tools.hpp"
 #include "pio.hpp"
-#include "process.hpp"
 
 #include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -25,7 +28,7 @@ bool any_contains(const std::vector<std::string>& v, std::string_view part) {
 }
 fs::path fresh(const char* name) {
     // canonical: on macOS /tmp and /var are symlinks, and the current directory is reported without them
-    const auto p = fs::canonical(fs::temp_directory_path()) / name;
+    const auto p = fs::canonical(fs::temp_directory_path()) / os::from_utf8(name);
     fs::remove_all(p);
     fs::create_directories(p);
     return p;
@@ -53,9 +56,10 @@ void read_envs() {
     write(dir / "empty/platformio.ini", "[platformio]\n");
     assert(!read_project(dir / "empty", why) && contains(why, "[env:"));
 
-    // PlatformIO's ESP-IDF builder stops with "whitespace in project paths": say so before it does
+    // PlatformIO project reading itself allows spaces; chip families (such as ESP-IDF) reject them if required
     write(dir / "my proj/platformio.ini", "[env:a]\n");
-    assert(!read_project(dir / "my proj", why) && contains(why, "space"));
+    const auto with_space = read_project(dir / "my proj", why);
+    assert(with_space && with_space->dir == dir / "my proj");
     fs::remove_all(dir);
 }
 
@@ -63,13 +67,16 @@ void read_envs() {
 // The agent is an ESP-IDF component: other frameworks and chips build and flash fine, and then show nothing.
 void unsupported_projects_are_refused() {
     const auto dir = fresh("malgrind_pio_fw");
-    const auto prepare = [&](const char* ini, const char* env) {
-        write(dir / "platformio.ini", ini);
-        fs::create_directories(dir / "bin");
-        write(dir / "bin/pio", "#!/bin/sh\n");
-        setenv("PATH", (dir / "bin").c_str(), 1);
+    ScopedEnv save_path("PATH", os::to_utf8(dir / "bin"));
+    ScopedEnv save_core("PLATFORMIO_CORE_DIR", std::nullopt);
+    ScopedEnv save_drive("SystemDrive", std::nullopt);
+    fs::create_directories(dir / "bin");
+    fs::copy_file(MALGRIND_FAKE_TOOL, dir / "bin" / os::exe_name("pio"), fs::copy_options::overwrite_existing);
+    const auto prepare = [&](const char* ini, const char* env, const fs::path& proj_dir = {}) {
+        const fs::path target = proj_dir.empty() ? dir : proj_dir;
+        write(target / "platformio.ini", ini);
         try {
-            (void)prepare_project(dir, dir, env, "/dev/ttyUSB0");
+            (void)prepare_project(dir, target, env, "/dev/ttyUSB0");
             return std::string("ok");
         } catch (const std::exception& e) {
             return std::string(e.what());
@@ -83,6 +90,7 @@ void unsupported_projects_are_refused() {
     assert(contains(prepare("[env:a]\nplatform = espressif32\nframework = arduino\n[env:b]\nframework = espidf\n", "a"), "espidf")); // per env
     assert(contains(prepare("[env:a]\nplatform = ststm32\nframework = stm32cube\n", "a"), "ESP32"));
     assert(contains(prepare("[env:a]\nplatform = espressif32\n", "missing"), "no environment"));
+    assert(contains(prepare("[env:a]\nplatform = espressif32\nframework = espidf\n", "a", dir / "my proj"), "space"));
     fs::remove_all(dir);
 }
 
@@ -101,9 +109,10 @@ void relative_paths_become_absolute() {
     const auto inv = agent_build("/opt/pio", *p, "esp32dev", "/dev/ttyUSB0", "agent-copy"); // a relative --agent-dir too
     for (const auto& entry : inv.env) {
         const auto value = entry.substr(entry.find('=') + 1);
-        assert(value.starts_with("/") || value.starts_with("pre:/")); // every path in the environment is absolute
+        const auto path_str = value.starts_with("pre:") ? value.substr(4) : value;
+        assert(os::from_utf8(path_str).is_absolute()); // every path in the environment is absolute
     }
-    assert(fs::path(inv.argv[3]).is_absolute());
+    assert(os::from_utf8(inv.argv[3]).is_absolute());
 
     fs::current_path(dir / "proj");
     const auto here = read_project(".", why);
@@ -132,15 +141,15 @@ void agent_build_leaves_the_project_alone() {
     write(dir / "platformio.ini", "[env:esp32dev]\n");
     const auto before = slurp(dir / "sdkconfig.esp32dev");
     const ProjectInfo project{dir, {"esp32dev"}, "esp32dev"};
-    const fs::path agent = MALGRIND_SOURCE_DIR;
+    const fs::path agent = fs::absolute(MALGRIND_SOURCE_DIR).lexically_normal();
     const auto inv = agent_build("/opt/pio", project, "esp32dev", "/dev/ttyUSB0", agent);
 
-    assert(inv.argv == (std::vector<std::string>{"/opt/pio", "run", "-d", dir.string(), "-e", "esp32dev", "-t", "upload",
+    assert(inv.argv == (std::vector<std::string>{"/opt/pio", "run", "-d", os::to_utf8(dir), "-e", "esp32dev", "-t", "upload",
                                                  "--upload-port", "/dev/ttyUSB0"}));
-    assert(std::ranges::find(inv.env, "PLATFORMIO_BUILD_DIR=" + (dir / ".pio/malgrind/build").string()) != inv.env.end());
-    assert(std::ranges::find(inv.env, "PLATFORMIO_EXTRA_SCRIPTS=pre:" + (agent / "agent/esp32/inject.py").string()) != inv.env.end());
-    assert(std::ranges::find(inv.env, "MALGRIND_AGENT_DIR=" + (agent / "agent/esp32").string()) != inv.env.end());
-    assert(std::ranges::find(inv.env, "MALGRIND_SDKCONFIG=" + (dir / ".pio/malgrind/sdkconfig.esp32dev").string()) != inv.env.end());
+    assert(std::ranges::find(inv.env, "PLATFORMIO_BUILD_DIR=" + os::to_utf8(dir / ".pio/malgrind/build")) != inv.env.end());
+    assert(std::ranges::find(inv.env, "PLATFORMIO_EXTRA_SCRIPTS=pre:" + os::to_utf8(agent / "agent/esp32/inject.py")) != inv.env.end());
+    assert(std::ranges::find(inv.env, "MALGRIND_AGENT_DIR=" + os::to_utf8(agent / "agent/esp32")) != inv.env.end());
+    assert(std::ranges::find(inv.env, "MALGRIND_SDKCONFIG=" + os::to_utf8(dir / ".pio/malgrind/sdkconfig.esp32dev")) != inv.env.end());
 
     const auto merged = slurp(dir / ".pio/malgrind/sdkconfig.esp32dev");
     assert(contains(merged, "CONFIG_A=1") && contains(merged, "BAUDRATE=921600") && !contains(merged, "115200"));
@@ -173,35 +182,50 @@ void plain_flash_has_no_agent() {
 }
 
 void find_pio_fallback() {
+    ScopedEnv save_path("PATH", std::nullopt);
+    ScopedEnv save_core("PLATFORMIO_CORE_DIR", std::nullopt);
+    ScopedEnv save_drive("SystemDrive", std::nullopt);
     const auto home = fresh("malgrind_pio_home");
-    setenv("PATH", "", 1);
     assert(!find_pio(home));
-    write(home / ".platformio/penv/bin/pio", "#!/bin/sh\n");
-    assert(find_pio(home) == home / ".platformio/penv/bin/pio");
+    const auto pio = os::venv_bin(home / ".platformio/penv") / os::exe_name("pio");
+    write(pio, "");
+    assert(find_pio(home) == pio);
     fs::remove_all(home);
 }
 
 void run_lines_streams() {
     std::vector<std::string> lines;
-    const int code = run_lines({"/bin/sh", "-c", "echo $X; echo a; echo b >&2; printf 'p1\\rp2\\n'; exit 3"}, {"X=1"},
-                               [&](std::string_view line) { lines.emplace_back(line); });
+    const int code = os::run_lines(
+        {MALGRIND_FAKE_TOOL, "a"},
+        {"FAKE_TOOL_ROLE=echo", "FAKE_OUT=1", "FAKE_ERR=b", "FAKE_RAW=p1\rp2\n", "FAKE_EXIT=3"},
+        [&](std::string_view line) { lines.emplace_back(line); });
     assert(code == 3 && lines == (std::vector<std::string>{"1", "a", "b", "p1", "p2"})); // \r splits progress lines too
-    assert(run_lines({"/no/such/program"}, {}, [](std::string_view) {}) != 0);
+    assert(os::run_lines({"/no/such/program"}, {}, [](std::string_view) {}) != 0);
 }
 
 void esptool_command_line() {
+    ScopedEnv save_core("PLATFORMIO_CORE_DIR", std::nullopt);
+    ScopedEnv save_drive("SystemDrive", std::nullopt);
     const auto home = fresh("malgrind_pio_esptool");
     write(home / "pio", "#!/usr/bin/env python3\n");
     assert(!esptool(home / "pio", home, "/dev/ttyUSB0", {"chip_id"})); // no esptool package yet
     write(home / ".platformio/packages/tool-esptoolpy/esptool.py", "");
+    const auto script = os::to_utf8(home / ".platformio/packages/tool-esptoolpy/esptool.py");
+    if constexpr (os::kind() != os::Kind::Windows) {
+        const auto inv = esptool(home / "pio", home, "/dev/ttyUSB0", {"read_flash", "0", "4096", "out.bin"});
+        assert(inv && inv->env.empty());
+        // the interpreter is the two words of the shebang line, then the script, the connection, the command
+        assert((inv->argv == std::vector<std::string>{"/usr/bin/env", "python3", script, "--port", "/dev/ttyUSB0", "--baud", "921600",
+                                                      "read_flash", "0", "4096", "out.bin"}));
+        write(home / "notscript", "binary");
+        assert(!esptool(home / "notscript", home, "p", {}));
+    }
+    const auto penv_py = os::venv_bin(home / ".platformio/penv") / os::exe_name("python");
+    write(penv_py, "");
     const auto inv = esptool(home / "pio", home, "/dev/ttyUSB0", {"read_flash", "0", "4096", "out.bin"});
     assert(inv && inv->env.empty());
-    const auto script = (home / ".platformio/packages/tool-esptoolpy/esptool.py").string();
-    // the interpreter is the two words of the shebang line, then the script, the connection, the command
-    assert((inv->argv == std::vector<std::string>{"/usr/bin/env", "python3", script, "--port", "/dev/ttyUSB0", "--baud", "921600",
+    assert((inv->argv == std::vector<std::string>{os::to_utf8(penv_py), script, "--port", "/dev/ttyUSB0", "--baud", "921600",
                                                   "read_flash", "0", "4096", "out.bin"}));
-    write(home / "notscript", "binary");
-    assert(!esptool(home / "notscript", home, "p", {}));
     fs::remove_all(home);
 }
 

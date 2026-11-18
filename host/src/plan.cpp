@@ -1,9 +1,13 @@
 #include "plan.hpp"
 
+#include "os/paths.hpp"
+#include "os/process.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <format>
 #include <stdexcept>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -19,9 +23,18 @@ void override_command(Invocation& inv, const std::string& line, const char* what
     auto words = split_command(line);
     if (!words || words->empty()) throw std::runtime_error(std::format("{}: this is not a command line (is a quote left open?)", what));
     const auto& program = words->front();
-    const bool found = program.find('/') != std::string::npos ? fs::exists(program) : find_in_path(program).has_value();
+    const bool has_sep = program.find_first_of("/\\") != std::string::npos;
+    const bool found = has_sep ? fs::exists(os::from_utf8(program)) : os::find_in_path(program).has_value();
     if (!found) throw std::runtime_error(std::format("{}: '{}' was not found", what, program));
     inv.argv = std::move(*words);
+}
+
+const Family* resolve_family(const Prepared& p, const std::string& env) {
+    if (p.family) return p.family;
+    std::string why;
+    const Family* family = family_for_project(p.project, env, why);
+    if (!family) throw std::runtime_error(why);
+    return family;
 }
 
 } // namespace
@@ -85,11 +98,13 @@ Plan make_plan(const Prepared& p, const fs::path& agent_dir, const RunSettings& 
         throw std::runtime_error(std::format("platformio.ini has no environment '{}'", env));
     if (s.rate_hz != 0 && (s.rate_hz < kMinRateHz || s.rate_hz > kMaxRateHz))
         throw std::runtime_error(std::format("the sampling rate must be between {} and {} Hz", kMinRateHz, kMaxRateHz));
-    if (!s.elf.empty() && !fs::exists(s.elf)) throw std::runtime_error("the firmware ELF does not exist: " + s.elf.string());
+    if (!s.elf.empty() && !fs::exists(s.elf)) throw std::runtime_error("the firmware ELF does not exist: " + os::to_utf8(s.elf));
     const auto extra = split_command(s.extra_args);
     if (!extra) throw std::runtime_error("extra arguments: a quote is left open");
 
-    Plan plan{agent_command(p.pio, p.project, env, p.port, agent_dir, false), agent_command(p.pio, p.project, env, p.port, agent_dir, true), {}, {}};
+    const Family* family = resolve_family(p, env);
+    auto cmds = family->agent_commands(ToolContext{{}, p.pio, agent_dir}, p.project, env, p.port, s, false);
+    Plan plan{std::move(cmds.build), std::move(cmds.upload), std::move(cmds.elf), {}, {}, env, s.rate_hz};
     for (auto* inv : {&plan.build, &plan.upload}) {
         inv->argv.insert(inv->argv.end(), extra->begin(), extra->end());
         if (!s.build_flags.empty()) inv->env.push_back("PLATFORMIO_BUILD_FLAGS=" + s.build_flags);
@@ -98,13 +113,15 @@ Plan make_plan(const Prepared& p, const fs::path& agent_dir, const RunSettings& 
     override_command(plan.upload, s.upload_command, "upload command");
     plan.build_text = join_command(plan.build.argv);
     plan.upload_text = join_command(plan.upload.argv);
-    plan.env = env;
-    plan.rate_hz = s.rate_hz;
     return plan;
 }
 
 void write_plan_files(const Prepared& p, const fs::path& agent_dir, const Plan& plan) {
-    write_agent_sdkconfig(p.project, plan.env, agent_dir, plan.rate_hz);
+    const Family* family = resolve_family(p, plan.env);
+    RunSettings s;
+    s.env = plan.env;
+    s.rate_hz = plan.rate_hz;
+    (void)family->agent_commands(ToolContext{{}, p.pio, agent_dir}, p.project, plan.env, p.port, s, true);
 }
 
 } // namespace malgrind::host

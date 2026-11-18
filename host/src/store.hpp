@@ -26,7 +26,7 @@ namespace malgrind::host {
 [[nodiscard]] std::string utc_now(const char* fmt);
 
 struct RunMeta {
-    std::string id{}, name{}, notes{}, project{}, env{}, port{};
+    std::string id{}, name{}, notes{}, project{}, env{}, port{}, device_id{};
     std::string project_id{}; // the malgrind project (projects.hpp) this run belongs to; empty for runs made without one
     std::string started{}; // ISO-8601 UTC, "2026-11-15T20:01:02Z"
     std::optional<Arch> arch{};
@@ -68,7 +68,7 @@ private:
 class RunStore {
 public:
     explicit RunStore(std::filesystem::path root); // created if missing
-    // $XDG_DATA_HOME/malgrind/runs, else ~/.local/share/malgrind/runs; macOS: ~/Library/Application Support/malgrind/runs
+    // Per-user data directory (os::user_data_dir()) + "/malgrind/runs".
     [[nodiscard]] static std::filesystem::path default_root();
 
     [[nodiscard]] RunWriter create(RunMeta meta); // assigns id ("yyyymmdd-hhmmss", "-2"... on a clash) and `started`

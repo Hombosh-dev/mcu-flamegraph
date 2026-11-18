@@ -7,6 +7,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 enable_testing()
 
+if(WIN32)
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 UNICODE _UNICODE)
+endif()
+
+function(malgrind_add_test name)
+    add_executable(test_${name} ${ARGN})
+    target_compile_options(test_${name} PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/UNDEBUG,-UNDEBUG>)
+    add_test(NAME ${name} COMMAND test_${name})
+endfunction()
+
 # The PC tool uses C++20 <format>: GCC >= 13, or Clang/libc++ >= 17 (Xcode 15, macOS 13.3+ deployment target).
 include(CheckCXXSourceCompiles)
 check_cxx_source_compiles("#include <format>\nint main() { return std::format(\"{}\", 1).size() == 1 ? 0 : 1; }" MALGRIND_HAS_FORMAT)

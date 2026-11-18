@@ -9,13 +9,13 @@
   interface Props {
     sidecar: Sidecar;
     project: ProjectMeta;
-    port: string;
+    device: string;
     mode: 'attach' | 'new_run';
-    boardLine: string; // "Silicon Labs CP210x · /dev/ttyUSB0 · USB 3-3", for the sentence that names the board
+    boardLine: string; // "Silicon Labs CP210x · USB 3-3", for the sentence that names the board
     onStart(args: { projectName: string; runName: string; settings: RunSettings }): void;
     onCancel(): void;
   }
-  let { sidecar, project, port, mode, boardLine, onStart, onCancel }: Props = $props();
+  let { sidecar, project, device, mode, boardLine, onStart, onCancel }: Props = $props();
 
   // The panel is shown before every run: it starts from what the project used last time (else what was detected) and every
   // field can be changed. What it sends is stored with the run.
@@ -63,7 +63,7 @@
 
   onMount(async () => {
     try {
-      plan = await sidecar.call<RunPlan>('run_plan', { project: project.id, port, mode });
+      plan = await sidecar.call<RunPlan>('run_plan', { project: project.id, device, mode });
       fill(plan.last ?? plan.detected, plan.detected);
       if (mode === 'attach' && !elf) elf = plan.detected.elf;
     } catch (e) {
@@ -78,7 +78,7 @@
     const timer = setTimeout(async () => {
       const mine = ++asked;
       try {
-        const answer = await sidecar.call<RunPlan>('run_plan', { project: project.id, port, mode, settings: sent });
+        const answer = await sidecar.call<RunPlan>('run_plan', { project: project.id, device, mode, settings: sent });
         if (mine !== asked) return; // an older answer
         engineError = answer.error;
         warning = answer.warning ?? '';

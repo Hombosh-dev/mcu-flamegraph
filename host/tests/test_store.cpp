@@ -120,6 +120,27 @@ void elf_copy() {
     fs::remove_all(root);
 }
 
+void device_id_roundtrip_and_legacy_meta() {
+    const auto root = fresh_root("malgrind_store_g");
+    std::string id;
+    {
+        RunStore store(root);
+        id = store.create({.name = "dev-run", .port = "ttyUSB0", .device_id = "usb-10c4-ea60-sn-0001"}).meta().id;
+    }
+    RunStore again(root);
+    const auto roundtrip = again.get(id);
+    assert(roundtrip && roundtrip->port == "ttyUSB0" && roundtrip->device_id == "usb-10c4-ea60-sn-0001");
+
+    // Old meta.json written before device_id existed must load cleanly with device_id == "".
+    const auto legacy_dir = root / "20260101-000000";
+    fs::create_directories(legacy_dir);
+    std::ofstream(legacy_dir / "meta.json")
+        << R"({"id":"20260101-000000","name":"legacy","port":"/dev/ttyUSB0","started":"2026-01-01T00:00:00Z"})";
+    const auto legacy = again.get("20260101-000000");
+    assert(legacy && legacy->port == "/dev/ttyUSB0" && legacy->device_id.empty());
+    fs::remove_all(root);
+}
+
 } // namespace
 
 int main() {
@@ -130,5 +151,6 @@ int main() {
     update_and_remove();
     id_collision();
     elf_copy();
+    device_id_roundtrip_and_legacy_meta();
     std::puts("store ok");
 }

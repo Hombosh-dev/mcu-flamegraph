@@ -22,7 +22,7 @@
   let hello = $state<Hello | null>(null);
   let fatal = $state('');
   let route = $state<Route>({ name: 'start' });
-  let removingPort = $state<string | null>(null);
+  let removingDevice = $state<string | null>(null);
 
   // `recording`: attached or built just now; otherwise opened from the history
   const show = (run: RunMeta, recording: boolean) => (route = { name: 'run', run, live: recording });
@@ -44,7 +44,8 @@
           const back = home(route.run);
           sidecar?.call('stop').finally(() => (route = back));
         },
-        removeAgent: () => (removingPort = route.name === 'run' && route.live ? (route.run.port ?? '') : ''), // '' = the dialog picks the port
+        removeAgent: () =>
+          (removingDevice = route.name === 'run' && route.live ? (route.run.device_id || route.run.port || '') : ''), // '' = the dialog picks the device
       });
     } catch (e) {
       fatal = String(e instanceof Error ? e.message : e);
@@ -77,17 +78,17 @@
       run={route.run}
       live={route.live}
       onClose={() => (route = home(route.name === 'run' ? route.run : undefined))}
-      onRemoveAgent={(port) => (removingPort = port)}
+      onRemoveAgent={(device) => (removingDevice = device)}
     />
   {/key}
 {/if}
 
-{#if sidecar && removingPort !== null}
+{#if sidecar && removingDevice !== null}
   <RemoveAgent
     {sidecar}
-    port={removingPort}
-    onCancel={() => (removingPort = null)}
-    onDone={() => ((removingPort = null), (route = { name: 'start' }))}
+    device={removingDevice}
+    onCancel={() => (removingDevice = null)}
+    onDone={() => ((removingDevice = null), (route = { name: 'start' }))}
   />
 {/if}
 

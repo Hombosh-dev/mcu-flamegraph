@@ -1,7 +1,11 @@
-#include "process.hpp"
+#include "os/process.hpp"
+
+#include "os/paths.hpp"
+#include "os/process_internal.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -15,12 +19,15 @@ extern char** environ;
 #define MALGRIND_ENVIRON environ
 #endif
 
-namespace malgrind::host {
+namespace fs = std::filesystem;
+
+namespace malgrind::host::os {
 
 namespace {
-// Spawns argv with the given file actions; returns the pid or -1.
+
 pid_t spawn(const std::vector<std::string>& argv, posix_spawn_file_actions_t* actions, char* const* envp = MALGRIND_ENVIRON) {
     std::vector<char*> args;
+    args.reserve(argv.size() + 1);
     for (const auto& a : argv) args.push_back(const_cast<char*>(a.c_str()));
     args.push_back(nullptr);
     pid_t pid = -1;
@@ -29,14 +36,37 @@ pid_t spawn(const std::vector<std::string>& argv, posix_spawn_file_actions_t* ac
 
 int wait_for(pid_t pid) {
     int status = 0;
-    waitpid(pid, &status, 0);
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
+
+bool make_cloexec_pipe(std::array<int, 2>& fds) {
+    if (pipe(fds.data()) != 0) return false;
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    return true;
+}
+
 } // namespace
+
+std::optional<fs::path> find_in_path(const std::string& name) {
+    if (name.empty()) return std::nullopt;
+    const auto path = get_env("PATH");
+    if (!path) return std::nullopt;
+    const auto bin = exe_name(name);
+    for (const auto& dir : split_path_list(*path)) {
+        const fs::path candidate = dir / bin;
+        std::error_code ec;
+        if (fs::is_regular_file(candidate, ec) && ::access(candidate.c_str(), X_OK) == 0) return candidate;
+    }
+    return std::nullopt;
+}
 
 std::string capture(const std::vector<std::string>& argv) {
     std::array<int, 2> fds{};
-    if (argv.empty() || pipe(fds.data()) != 0) return {};
+    if (argv.empty() || !make_cloexec_pipe(fds)) return {};
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
@@ -49,7 +79,12 @@ std::string capture(const std::vector<std::string>& argv) {
     std::string out;
     if (pid > 0) {
         std::array<char, 4096> buf;
-        for (ssize_t n; (n = read(fds[0], buf.data(), buf.size())) > 0;) out.append(buf.data(), static_cast<std::size_t>(n));
+        for (;;) {
+            const ssize_t n = read(fds[0], buf.data(), buf.size());
+            if (n > 0) out.append(buf.data(), static_cast<std::size_t>(n));
+            else if (n < 0 && errno == EINTR) continue;
+            else break;
+        }
         wait_for(pid);
     }
     close(fds[0]);
@@ -65,7 +100,7 @@ int run(const std::vector<std::string>& argv) {
 int run_lines(const std::vector<std::string>& argv, const std::vector<std::string>& env_add,
               const std::function<void(std::string_view line)>& on_line) {
     std::array<int, 2> fds{};
-    if (argv.empty() || pipe(fds.data()) != 0) return -1;
+    if (argv.empty() || !make_cloexec_pipe(fds)) return -1;
     // this process's environment, minus the names that env_add sets, plus env_add
     std::vector<std::string> env;
     for (char** e = MALGRIND_ENVIRON; e && *e; ++e) {
@@ -77,6 +112,7 @@ int run_lines(const std::vector<std::string>& argv, const std::vector<std::strin
     }
     env.insert(env.end(), env_add.begin(), env_add.end());
     std::vector<char*> envp;
+    envp.reserve(env.size() + 1);
     for (auto& e : env) envp.push_back(e.data());
     envp.push_back(nullptr);
 
@@ -95,21 +131,21 @@ int run_lines(const std::vector<std::string>& argv, const std::vector<std::strin
         return -1;
     }
     std::string pending;
-    auto flush_lines = [&](bool all) {
-        for (std::size_t at; (at = pending.find_first_of("\r\n")) != std::string::npos;) {
-            if (at > 0) on_line(std::string_view(pending).substr(0, at));
-            pending.erase(0, at + 1);
-        }
-        if (all && !pending.empty()) on_line(pending), pending.clear();
-    };
     std::array<char, 4096> buf;
-    for (ssize_t n; (n = read(fds[0], buf.data(), buf.size())) > 0;) {
-        pending.append(buf.data(), static_cast<std::size_t>(n));
-        flush_lines(false);
+    for (;;) {
+        const ssize_t n = read(fds[0], buf.data(), buf.size());
+        if (n > 0) {
+            pending.append(buf.data(), static_cast<std::size_t>(n));
+            detail::flush_lines(pending, on_line, false);
+        } else if (n < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
     }
-    flush_lines(true);
+    detail::flush_lines(pending, on_line, true);
     close(fds[0]);
     return wait_for(pid);
 }
 
-} // namespace malgrind::host
+} // namespace malgrind::host::os

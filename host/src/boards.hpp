@@ -1,33 +1,30 @@
 #pragma once
 
-// What is plugged in, as far as the USB bus tells (Linux sysfs; elsewhere nothing is known and the port name is all a tile has).
-// The adapter is NOT the chip: a CH343 or CP210x bridge sits in front of any MCU. The chip is learned from an agent's frame
-// or by asking esptool, which resets the board, so it is never done by itself.
+// USB-serial adapter naming and USB debug probe identification on top of os::UsbInfo.
+// The adapter is NOT the chip: a CH343 or CP210x bridge sits in front of any MCU.
 
-#include <filesystem>
+#include "os/ports.hpp"
+
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace malgrind::host {
 
-struct UsbInfo {
-    std::string vid, pid; // lower-case hex, "1a86"
-    std::string product, manufacturer;
-    std::string serial;   // the adapter's serial number, if it has one: tells two boards of the same kind apart
-    std::string location; // where it is plugged in, "3-3" (bus-port): changes when the board moves to another socket
-};
-
-// The USB device behind a serial port such as /dev/ttyACM0. nullopt if sysfs does not say.
-[[nodiscard]] std::optional<UsbInfo> usb_info_for_port(const std::filesystem::path& port, const std::filesystem::path& sys_root = "/sys");
+using os::UsbInfo;
 
 // A readable name for a USB-serial adapter: "WCH CH340/CH343 USB-UART", "Silicon Labs CP210x USB-UART", ... else the product string.
 [[nodiscard]] std::string adapter_name(const UsbInfo& info);
 
 struct DebugProbe {
-    std::string name, vid, pid;
+    std::string name, vid, pid, serial, location;
 };
+
+// Map a USB VID/PID (4-digit lower-case hex) to a known debug probe name, or nullopt if not a probe.
+[[nodiscard]] std::optional<std::string> probe_name(std::string_view vid, std::string_view pid);
+
 // USB debug probes that are plugged in (ST-Link, J-Link, CMSIS-DAP, FTDI JTAG adapters).
-[[nodiscard]] std::vector<DebugProbe> find_probes(const std::filesystem::path& sys_root = "/sys");
+[[nodiscard]] std::vector<DebugProbe> find_probes();
 
 } // namespace malgrind::host

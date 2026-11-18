@@ -1,13 +1,15 @@
 #include "serve.hpp"
 
-#include "access.hpp"
-#include "boards.hpp"
+#include "devices.hpp"
 #include "discover.hpp"
 #include "github.hpp"
 #include "ops.hpp"
+#include "os/access.hpp"
+#include "os/paths.hpp"
+#include "os/process.hpp"
+#include "os/tools.hpp"
 #include "plan.hpp"
 #include "pio.hpp"
-#include "process.hpp"
 #include "projects.hpp"
 #include "setup.hpp"
 #include "session.hpp"
@@ -20,11 +22,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cerrno>
 #include <chrono>
-#include <map>
-#include <cstring>
 #include <format>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -48,6 +48,12 @@ std::string str_arg(const json& req, const char* key) {
 std::optional<std::string> opt_str_arg(const json& req, const char* key) {
     if (!req.contains(key) || !req[key].is_string()) return std::nullopt;
     return req[key].get<std::string>();
+}
+
+std::string device_arg(const json& req) {
+    if (const auto dev = opt_str_arg(req, "device")) return *dev;
+    if (const auto port = opt_str_arg(req, "port")) return *port;
+    throw std::runtime_error("missing argument: device");
 }
 
 class Server {
@@ -118,17 +124,16 @@ private:
     json command(const std::string& cmd, const json& req) {
         if (cmd == "hello") {
             const auto pio = find_pio(options_.home);
-            return {{"version", kVersion}, {"data_dir", options_.data_dir.string()}, {"pio", pio ? json(pio->string()) : json(nullptr)}};
+            return {{"version", kVersion}, {"data_dir", os::to_utf8(options_.data_dir)}, {"pio", pio ? json(os::to_utf8(*pio)) : json(nullptr)}};
         }
-        if (cmd == "ports") return json(find_serial_ports());
+        if (cmd == "devices") return devices_command();
         if (cmd == "probe") return probe(req);
         if (cmd == "project") {
             std::string why;
-            const auto project = read_project(str_arg(req, "dir"), why);
+            const auto project = read_project(os::from_utf8(str_arg(req, "dir")), why);
             if (!project) throw std::runtime_error(why);
-            return {{"dir", project->dir.string()}, {"envs", project->envs}, {"default_env", project->default_env}};
+            return {{"dir", os::to_utf8(project->dir)}, {"envs", project->envs}, {"default_env", project->default_env}};
         }
-        if (cmd == "boards") return boards();
         if (cmd == "run_plan") return run_plan(req);
         if (cmd == "setup") return setup_info();
         if (cmd == "projects") return list_projects();
@@ -192,33 +197,49 @@ private:
         return result ? *result : R"({"functions":[]})";
     }
 
+    Device resolve_serial(const std::string& ref) const {
+        const auto now = options_.devices ? options_.devices() : list_devices();
+        const auto dev = resolve_device(ref, now);
+        if (!dev) throw std::runtime_error(std::format("device {} is not plugged in", ref));
+        if (dev->kind != DeviceKind::Serial) throw std::runtime_error(std::format("device {} is not a serial port", ref));
+        return *dev;
+    }
+
     json probe(const json& req) {
-        const auto port = str_arg(req, "port");
-        const auto r = probe_port(port);
-        json result = {{"busy", r.busy}, {"agent", r.agent}, {"denied", r.denied}};
+        const auto dev = resolve_serial(device_arg(req));
+        const auto r = probe_device(dev, options_.open_source);
+        const Family* probed_family = r.agent ? family_for_arch(r.arch) : nullptr;
+        json result = {{"busy", r.busy},
+                       {"agent", r.agent},
+                       {"denied", r.denied},
+                       {"family", probed_family ? std::string(probed_family->id()) : ""},
+                       {"family_name", probed_family ? std::string(probed_family->name()) : ""}};
         if (r.agent) {
             result["arch"] = std::string(arch_name(r.arch));
             result["ncores"] = r.ncores;
             result["cpu_mhz"] = r.cpu_mhz;
         }
+        const Family* method_family =
+            probed_family ? probed_family : (!dev.family_hint.empty() ? family_by_id(dev.family_hint) : nullptr);
         std::string problem; // why the chosen project cannot be built with the agent; none chosen: no problem yet
         if (const auto id = opt_str_arg(req, "project"); id && !id->empty()) {
             try {
                 const auto project = project_of(*id);
                 require_buildable(project);
-                (void)prepare_project(options_.home, project.dir, project.env, port);
+                method_family = prepare_project(options_.home, project.dir, project.env, dev.path).family;
             } catch (const std::exception& e) {
+                method_family = nullptr;
                 problem = e.what();
             }
         }
         json list = json::array();
-        for (const auto& m : methods(r, find_pio(options_.home).has_value(), problem))
+        for (const auto& m : methods(r, method_family, find_pio(options_.home).has_value(), problem))
             list.push_back({{"id", m.id}, {"available", m.available}, {"why", m.why}});
         result["methods"] = std::move(list);
         return result;
     }
 
-    json start_live(Source source, RunMeta meta, fs::path elf, fs::path project) {
+    json start_live(std::unique_ptr<ByteSource> source, RunMeta meta, fs::path elf, fs::path project) {
         auto writer = store_.create(std::move(meta));
         json run = writer.meta();
         set_session(Session::live(std::move(source), std::move(writer), std::move(elf), std::move(project), emitter()));
@@ -228,21 +249,26 @@ private:
     json attach(const json& req) {
         if (busy_) throw std::runtime_error("busy: a build or flash is running");
         if (live()) throw std::runtime_error("a run is live: stop it first");
-        const auto port = str_arg(req, "port");
+        const auto dev = resolve_serial(device_arg(req));
         std::string project_id;
         const auto settings = settings_arg(req);
-        fs::path project_dir, elf = !settings.elf.empty() ? settings.elf : fs::path(opt_str_arg(req, "elf").value_or(""));
-        if (!elf.empty() && !fs::exists(elf)) throw std::runtime_error("the firmware ELF does not exist: " + elf.string());
+        fs::path project_dir, elf = !settings.elf.empty() ? settings.elf : os::from_utf8(opt_str_arg(req, "elf").value_or(""));
+        if (!elf.empty() && !fs::exists(elf)) throw std::runtime_error("the firmware ELF does not exist: " + os::to_utf8(elf));
         if (const auto id = opt_str_arg(req, "project"); id && !id->empty()) {
             const auto project = project_of(*id);
             project_id = project.id;
             project_dir = project.dir;
             if (elf.empty()) elf = project.elf; // a project without code may still have been given its ELF
         }
-        auto source = open_source(port);
+        auto source = open_device_source(dev, options_.open_source);
         remember_settings(project_id, settings);
         return start_live(std::move(source),
-                          {.name = str_arg(req, "name"), .project = project_dir.string(), .port = port, .project_id = project_id, .settings = settings},
+                          {.name = str_arg(req, "name"),
+                           .project = os::to_utf8(project_dir),
+                           .port = dev.name.empty() ? dev.path : dev.name,
+                           .device_id = dev.id,
+                           .project_id = project_id,
+                           .settings = settings},
                           std::move(elf), std::move(project_dir));
     }
 
@@ -313,13 +339,13 @@ private:
         const auto source = str_arg(req, "source");
         auto name = opt_str_arg(req, "name").value_or("");
         if (source == "folder") {
-            const fs::path chosen = str_arg(req, "dir");
+            const fs::path chosen = os::from_utf8(str_arg(req, "dir"));
             std::string why;
             const auto found = find_project(chosen, why);
             if (!found) throw std::runtime_error(why);
             const auto info = read_project(*found, why);
             if (!info) throw std::runtime_error(why);
-            if (name.empty()) name = fs::absolute(chosen).lexically_normal().parent_path().empty() ? "project" : info->dir.filename().string();
+            if (name.empty()) name = fs::absolute(chosen).lexically_normal().parent_path().empty() ? "project" : os::to_utf8(info->dir.filename());
             // the user picked their own folder, so it is trusted; they are not asked again
             return project_json(projects_.create({.name = name, .origin = Origin::Folder, .dir = info->dir, .env = info->default_env, .trusted = true}));
         }
@@ -340,68 +366,83 @@ private:
             return project_json(project); // not trusted yet
         }
         if (source == "none") {
-            const auto elf = opt_str_arg(req, "elf").value_or("");
+            const auto elf = os::from_utf8(opt_str_arg(req, "elf").value_or(""));
             if (!elf.empty() && !elf_machine(elf)) throw std::runtime_error("that file is not an ELF (a firmware .elf)");
-            if (name.empty()) name = elf.empty() ? "Board" : fs::path(elf).stem().string();
+            if (name.empty()) name = elf.empty() ? "Board" : os::to_utf8(elf.stem());
             return project_json(projects_.create({.name = name, .origin = Origin::None}, elf));
         }
         throw std::runtime_error("source must be \"folder\", \"git\" or \"none\"");
     }
 
-    // What the machine has for the jobs the app needs done: PlatformIO to build, git for GitHub links, pkexec to ask for access.
+    // What the machine has for the jobs the app needs done: PlatformIO to build, git for GitHub links, and port access helpers.
     json setup_info() {
-        auto path_or_null = [](const std::optional<fs::path>& p) { return p ? json(p->string()) : json(nullptr); };
+        auto path_or_null = [](const std::optional<fs::path>& p) { return p ? json(os::to_utf8(*p)) : json(nullptr); };
+        const auto py = os::find_python();
         return {{"pio", path_or_null(find_pio(options_.home))},
-                {"python", path_or_null(find_python())},
-                {"git", path_or_null(find_in_path("git"))},
-                {"pkexec", find_in_path("pkexec").has_value()},
-                {"user", current_user()}};
+                {"python", py && !py->empty() ? json((*py)[0]) : json(nullptr)},
+                {"python_hint", os::python_hint()},
+                {"git", path_or_null(os::find_in_path("git"))},
+                {"can_grant_access", os::can_grant_access()},
+                {"os", std::string(os::kind_name())},
+                {"user", os::current_user()}};
     }
 
     json install_pio_command() {
         if (find_pio(options_.home)) throw std::runtime_error("PlatformIO is already installed");
-        const auto python = find_python();
-        if (!python) throw std::runtime_error("Python 3 was not found: install it (on Ubuntu: sudo apt install python3 python3-venv) and try again");
+        const auto python = os::find_python();
+        if (!python) throw std::runtime_error("Python 3 was not found: " + os::python_hint() + ", then try again");
         install_pio(*python, options_.home, build_line());
-        return {{"pio", find_pio(options_.home)->string()}};
+        return {{"pio", os::to_utf8(*find_pio(options_.home))}};
     }
 
-    // Gives this user access to a serial port that belongs to a group they are not in: one system password prompt (pkexec).
+    // Gives this user access to a serial port that belongs to a group they are not in.
     json grant_access(const json& req) {
-        const auto port = str_arg(req, "port");
-        const auto known = find_serial_ports();
-        if (std::ranges::find(known, port) == known.end()) throw std::runtime_error("not a serial port of this computer: " + port);
-        const auto before = port_access(port);
+        const auto dev = resolve_serial(device_arg(req));
+        const auto before = os::port_access(dev.path);
         if (before.ok) return {{"ok_now", true}, {"relogin", false}}; // nothing to do
-        const auto user = current_user();
-        const auto pkexec = find_in_path("pkexec");
-        if (!pkexec)
-            throw std::runtime_error("pkexec (polkit) was not found. Run these two lines in a terminal, then press Rescan:\n" + manual_commands(port, user, before.group));
-        const auto command = grant_access_command(*pkexec, port, user, before.group);
-        if (!command) throw std::runtime_error("cannot build the command for this user or port");
-        const int code = run_lines(command->argv, command->env, build_line());
+        const auto user = os::current_user();
+        const auto command = os::grant_access_command(dev.path, user, before.group);
+        if (!command) {
+            if (!os::can_grant_access())
+                throw std::runtime_error(os::grant_access_unavailable(dev.path, user, before.group));
+            throw std::runtime_error("cannot build the command for this user or port");
+        }
+        const int code = os::run_lines(command->argv, command->env, build_line());
         if (code == 126 || code == 127) throw std::runtime_error("the password prompt was cancelled, or the password was wrong");
         if (code != 0) throw std::runtime_error(std::format("granting access failed (exit code {})", code));
-        const auto after = port_access(port);
+        const auto after = os::port_access(dev.path);
         return {{"ok_now", after.ok}, {"relogin", !after.in_group}}; // relogin: the group applies from the next login, the ACL until the board is replugged
     }
 
-    json boards() {
-        auto ports = json::array();
-        for (const auto& port : find_serial_ports()) {
-            const auto usb = usb_info_for_port(port);
-            const auto access = port_access(port);
-            ports.push_back({{"port", port},
-                             {"adapter", usb ? adapter_name(*usb) : ""},
-                             {"vid", usb ? usb->vid : ""},
-                             {"pid", usb ? usb->pid : ""},
-                             {"serial", usb ? usb->serial : ""},
-                             {"location", usb ? usb->location : ""},
-                             {"access", {{"ok", access.ok}, {"group", access.group}, {"in_group", access.in_group}}}});
+    json devices_command() const {
+        const auto now = options_.devices ? options_.devices() : list_devices();
+        auto list = json::array();
+        for (const auto& d : now) {
+            json usb = nullptr;
+            if (d.usb) {
+                usb = {{"vid", d.usb->vid},
+                       {"pid", d.usb->pid},
+                       {"serial", d.usb->serial},
+                       {"location", d.usb->location},
+                       {"product", d.usb->product},
+                       {"manufacturer", d.usb->manufacturer}};
+            }
+            const Family* hinted = d.family_hint.empty() ? nullptr : family_by_id(d.family_hint);
+            list.push_back({{"id", d.id},
+                            {"kind", d.kind == DeviceKind::Probe ? "probe" : "serial"},
+                            {"path", d.path},
+                            {"name", d.name},
+                            {"title", d.title},
+                            {"usb", std::move(usb)},
+                            {"access",
+                             {{"ok", d.access.ok},
+                              {"group", d.access.group},
+                              {"in_group", d.access.in_group},
+                              {"fixable", d.access.fixable}}},
+                            {"family_hint", d.family_hint},
+                            {"family_hint_name", hinted ? std::string(hinted->name()) : ""}});
         }
-        auto probes = json::array();
-        for (const auto& p : find_probes()) probes.push_back({{"name", p.name}, {"vid", p.vid}, {"pid", p.pid}});
-        return {{"ports", std::move(ports)}, {"probes", std::move(probes)}};
+        return {{"devices", std::move(list)}, {"can_grant_access", os::can_grant_access()}};
     }
 
     // ---- slow commands, one at a time, on a worker thread ------------------------------------------------------------
@@ -419,30 +460,45 @@ private:
         });
     }
 
+    struct PreparedDevice {
+        Prepared prepared;
+        Device device;
+    };
+
     // The project the request names, checked and ready to build (trusted, with source).
-    Prepared prepare(const json& req) {
+    PreparedDevice prepare(const json& req) {
         const auto project = project_of(str_arg(req, "project"));
         require_buildable(project);
-        return prepare_project(options_.home, project.dir, opt_str_arg(req, "env").value_or(project.env), str_arg(req, "port"));
+        auto dev = resolve_serial(device_arg(req));
+        auto p = prepare_project(options_.home, project.dir, opt_str_arg(req, "env").value_or(project.env), dev.path);
+        return {std::move(p), std::move(dev)};
     }
     LineFn build_line() {
         return [this](std::string_view line) { send({{"event", "build"}, {"line", std::string(line)}}); };
     }
 
     json new_run(const json& req) {
-        const auto p = prepare(req);
+        const auto pd = prepare(req);
+        const auto& p = pd.prepared;
+        const auto& dev = pd.device;
         if (live()) throw std::runtime_error("stop the live run first");
         const auto settings = settings_arg(req);
         // every setting is checked before the board is touched; a typo in a field costs nothing
         const auto plan = make_plan(p, options_.agent_dir, settings);
         write_plan_files(p, options_.agent_dir, plan);
         flash_agent(p, options_.home, options_.backup_dir, plan.build, plan.upload, build_line());
-        auto source = open_after_upload(p.port);
+        auto source = open_after_upload(dev.id, options_.devices ? options_.devices : list_devices, options_.open_source,
+                                        p.family->agent_baud());
         remember_settings(str_arg(req, "project"), settings);
         return start_live(std::move(source),
-                          {.name = str_arg(req, "name"), .project = p.project.dir.string(), .env = plan.env, .port = p.port,
-                           .project_id = str_arg(req, "project"), .settings = settings},
-                          settings.elf.empty() ? agent_elf(p.project, plan.env) : settings.elf, p.project.dir);
+                          {.name = str_arg(req, "name"),
+                           .project = os::to_utf8(p.project.dir),
+                           .env = plan.env,
+                           .port = dev.name.empty() ? dev.path : dev.name,
+                           .device_id = dev.id,
+                           .project_id = str_arg(req, "project"),
+                           .settings = settings},
+                          settings.elf.empty() ? plan.elf : settings.elf, p.project.dir);
     }
 
     // ---- run settings -------------------------------------------------------------------------------------------------
@@ -475,14 +531,15 @@ private:
             return result;
         }
         require_buildable(project);
-        const auto p = prepare_project(options_.home, project.dir, project.env, str_arg(req, "port"));
+        const auto dev = resolve_serial(device_arg(req));
+        const auto p = prepare_project(options_.home, project.dir, project.env, dev.path);
         detected.env = p.env;
         detected.rate_hz = kDefaultRateHz;
         detected.elf.clear(); // a new run finds its ELF after the build: nothing to offer here
         result["detected"] = detected;
         result["envs"] = p.project.envs;
-        result["elf_hint"] = agent_elf(p.project, p.env).string(); // where the build puts it; used when no ELF is chosen
         const auto detected_plan = make_plan(p, options_.agent_dir, {});
+        result["elf_hint"] = os::to_utf8(detected_plan.elf); // where the build puts it; used when no ELF is chosen
         result["detected_commands"] = {{"build", detected_plan.build_text}, {"upload", detected_plan.upload_text}};
         result["warning"] = "";
         try {
@@ -502,15 +559,16 @@ private:
         const auto how = opt_str_arg(req, "how").value_or("restore");
         if (how != "restore" && how != "rebuild") throw std::runtime_error("how must be \"restore\" or \"rebuild\"");
         if (how == "rebuild") {
-            const auto p = prepare(req);
+            const auto pd = prepare(req);
             set_session(nullptr); // the port must be free for the upload
-            run_pio(plain_flash(p.pio, p.project, p.env, p.port), build_line());
+            run_pio(plain_flash(pd.prepared.pio, pd.prepared.project, pd.prepared.env, pd.prepared.port), build_line());
             return json::object();
         }
         const auto pio = find_pio(options_.home);
         if (!pio) throw std::runtime_error(kNoPio);
+        const auto dev = resolve_serial(device_arg(req));
         set_session(nullptr);
-        restore_flash(*pio, options_.home, str_arg(req, "port"), options_.backup_dir, build_line());
+        restore_flash(*pio, options_.home, dev.path, options_.backup_dir, build_line());
         return json::object();
     }
 
@@ -518,9 +576,10 @@ private:
         if (live()) throw std::runtime_error("stop the live run first");
         const auto pio = find_pio(options_.home);
         if (!pio) throw std::runtime_error(kNoPio);
-        const auto chip = chip_id(*pio, str_arg(req, "port"), options_.home);
-        if (!chip) throw std::runtime_error("esptool could not identify the chip");
-        return {{"chip", *chip}};
+        const auto dev = resolve_serial(device_arg(req));
+        const auto id = identify_board({options_.home, *pio, options_.agent_dir}, dev.path, {}, dev.family_hint);
+        if (id.chip.empty()) throw std::runtime_error("could not identify the board on " + dev.path);
+        return {{"chip", id.chip}};
     }
 
     std::ostream& out_;

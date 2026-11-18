@@ -1,9 +1,11 @@
 #include "symbols.hpp"
 
-#include "process.hpp"
+#include "families/family.hpp"
+#include "os/paths.hpp"
+#include "os/process.hpp"
+#include "os/tools.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <format>
 #include <sstream>
 
@@ -17,12 +19,8 @@ namespace {
 std::uint32_t lookup_addr(std::size_t index, std::uint32_t pc) { return index == 0 ? pc : pc - 1; }
 
 std::vector<std::string> tool_names(Arch arch) {
-    switch (arch) {
-        case Arch::Host: return {"addr2line"};
-        case Arch::Xtensa: return {"xtensa-esp32-elf-addr2line", "xtensa-esp32s3-elf-addr2line"};
-        case Arch::ArmV7M: return {"arm-none-eabi-addr2line"};
-        case Arch::RiscV32: return {"riscv32-esp-elf-addr2line", "riscv-none-elf-addr2line"};
-    }
+    if (arch == Arch::Host) return {"addr2line"};
+    if (const Family* family = family_for_arch(arch)) return family->addr2line_names(arch);
     return {};
 }
 
@@ -45,18 +43,17 @@ std::string short_name(std::string name) {
 
 fs::path find_addr2line(Arch arch) {
     std::vector<fs::path> dirs;
-    if (const char* path = std::getenv("PATH")) {
-        std::istringstream in(path);
-        for (std::string d; std::getline(in, d, ':');) dirs.emplace_back(d);
-    }
-    if (const char* home = std::getenv("HOME")) {
+    if (const auto path = os::get_env("PATH")) dirs = os::split_path_list(*path);
+    for (const auto& core : os::platformio_core_dirs(os::home_dir())) {
         std::error_code ec;
-        for (const auto& pkg : fs::directory_iterator(fs::path(home) / ".platformio/packages", ec))
-            if (pkg.path().filename().string().starts_with("toolchain-")) dirs.push_back(pkg.path() / "bin");
+        for (const auto& pkg : fs::directory_iterator(core / "packages", ec))
+            if (os::to_utf8(pkg.path().filename()).starts_with("toolchain-")) dirs.push_back(pkg.path() / "bin");
     }
-    for (const auto& name : tool_names(arch))
+    for (const auto& name : tool_names(arch)) {
+        const auto bin = os::exe_name(name);
         for (const auto& dir : dirs)
-            if (std::error_code ec; fs::exists(dir / name, ec)) return dir / name;
+            if (std::error_code ec; fs::exists(dir / bin, ec)) return dir / bin;
+    }
     return {};
 }
 
@@ -80,12 +77,12 @@ void Symbolizer::prepare(const Frame& frame) {
         constexpr const char* kSentinel = "0xffffffff";
         for (std::size_t first = 0; first < todo.size(); first += kChunk) {
             const auto last = std::min(first + kChunk, todo.size());
-            std::vector<std::string> argv{tool_.string(), "-i", "-f", "-C", "-e", elf_.string()};
+            std::vector<std::string> argv{os::to_utf8(tool_), "-i", "-f", "-C", "-e", os::to_utf8(elf_)};
             for (auto i = first; i < last; ++i) {
                 argv.push_back(std::format("0x{:x}", todo[i]));
                 argv.push_back(kSentinel);
             }
-            std::istringstream out(capture(argv));
+            std::istringstream out(os::capture(argv));
             std::string func, location; // addr2line prints "function" then "file:line" per frame
             for (auto i = first; i < last; ++i) {
                 bool first_pair = true;

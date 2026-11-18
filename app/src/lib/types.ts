@@ -18,7 +18,7 @@ export interface RunPlan {
   detected_commands?: { build: string; upload: string };
   commands: { build: string; upload: string; env: string[] } | null; // for the settings that were sent; null when `error` is set
   error: string; // the field that does not hold up, in words
-  warning?: string; // allowed, but probably not meant (a typed upload line that names no port)
+  warning?: string; // allowed, but probably not meant (a typed upload line that names no device)
 }
 
 // Shapes of what the sidecar returns (host/src/serve.hpp, host/src/store.hpp).
@@ -29,6 +29,7 @@ export interface RunMeta {
   project: string;
   env: string;
   port: string;
+  device_id?: string;
   project_id: string; // the malgrind project this run belongs to; empty for runs made without one
   started: string; // ISO-8601 UTC
   arch: string | null;
@@ -57,6 +58,8 @@ export interface Probe {
   busy: boolean;
   agent: boolean;
   denied: boolean; // this user may not open the port (not in its group)
+  family: string;
+  family_name: string;
   arch?: string;
   ncores?: number;
   cpu_mhz?: number;
@@ -88,26 +91,39 @@ export interface ProjectMeta {
   last_run?: string | null;
 }
 
-export interface BoardPort {
-  port: string;
-  adapter: string; // the USB adapter (not the chip); empty if unknown
+export interface UsbInfo {
   vid: string;
   pid: string;
-  serial: string; // the adapter's serial number, if it has one
-  location: string; // where it is plugged in, "3-3"
-  access: { ok: boolean; group: string; in_group: boolean }; // whether this user may open the port
+  serial: string;
+  location: string;
+  product: string;
+  manufacturer: string;
+}
+
+export interface Device {
+  id: string;
+  kind: 'serial' | 'probe';
+  path: string;
+  name: string;
+  title: string;
+  usb: UsbInfo | null;
+  access: { ok: boolean; group: string; in_group: boolean; fixable: boolean };
+  family_hint: string;
+  family_hint_name: string;
 }
 
 // What the machine has for the jobs the app needs done (`setup`): paths, or null when missing.
 export interface SetupInfo {
   pio: string | null;
   python: string | null;
+  python_hint: string;
   git: string | null;
-  pkexec: boolean; // the system's graphical password prompt, used to grant port access
+  can_grant_access: boolean; // whether the engine can ask the system to grant port access
+  os?: string;
   user: string;
 }
 
-export interface BoardsInfo {
-  ports: BoardPort[];
-  probes: { name: string; vid: string; pid: string }[]; // USB debug probes that are plugged in
+export interface DevicesInfo {
+  devices: Device[];
+  can_grant_access: boolean;
 }

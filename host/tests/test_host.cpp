@@ -87,19 +87,6 @@ int main() {
         if (f["name"] == "0x400d0fff") assert(f["total"] == 5 && f["self"] == 0);   // 5, not 10
     assert(rfn["callees"].size() == 2); // itself and the leaf
 
-    // serial port discovery: only USB serial adapters count, result is sorted
-    const auto dev = std::filesystem::temp_directory_path() / "malgrind_test_dev";
-    std::filesystem::remove_all(dev);
-    std::filesystem::create_directories(dev);
-    for (const char* name : {"ttyUSB1", "ttyACM0", "ttyS0", "tty0", "null", "cu.usbserial-0001", "cu.Bluetooth-Incoming-Port",
-                             "tty.usbserial-0001"})
-        std::ofstream(dev / name);
-    const auto ports = find_serial_ports(dev); // Linux and macOS (cu.*usb*, no Bluetooth, no tty.*) names
-    assert(ports.size() == 3 && ports[0] == (dev / "cu.usbserial-0001").string() && ports[1] == (dev / "ttyACM0").string() &&
-           ports[2] == (dev / "ttyUSB1").string());
-    assert(find_serial_ports(dev / "missing").empty());
-    std::filesystem::remove_all(dev);
-
     // project and ELF discovery in a throw-away tree
     namespace fs = std::filesystem;
     const auto root = fs::temp_directory_path() / "malgrind_test_tree";

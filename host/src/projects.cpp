@@ -1,12 +1,12 @@
 #include "projects.hpp"
 
+#include "os/paths.hpp"
 #include "store.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
 #include <format>
 #include <fstream>
 #include <tuple>
@@ -34,15 +34,15 @@ std::optional<ProjectMeta> read_project_file(const fs::path& dir) {
     const auto j = nlohmann::json::parse(in, nullptr, false);
     if (!j.is_object()) return std::nullopt;
     ProjectMeta p;
-    p.id = j.value("id", dir.filename().string());
+    p.id = j.value("id", os::to_utf8(dir.filename()));
     p.name = j.value("name", "");
     const auto source = j.value("source", "none");
     p.origin = source == "folder" ? Origin::Folder : source == "git" ? Origin::Git : Origin::None;
-    p.dir = j.value("dir", "");
+    p.dir = os::from_utf8(j.value("dir", ""));
     p.url = j.value("url", "");
     p.env = j.value("env", "");
     p.created = j.value("created", "");
-    p.elf = j.value("elf", "");
+    p.elf = os::from_utf8(j.value("elf", ""));
     p.trusted = j.value("trusted", false);
     if (j.contains("last_settings") && j["last_settings"].is_object()) p.last_settings = j["last_settings"].get<RunSettings>();
     return p;
@@ -55,8 +55,8 @@ std::string_view origin_name(Origin origin) noexcept {
 }
 
 void to_json(nlohmann::json& j, const ProjectMeta& p) {
-    j = {{"id", p.id},           {"name", p.name},         {"source", origin_name(p.origin)}, {"dir", p.dir.string()},
-         {"url", p.url},         {"env", p.env},           {"created", p.created},            {"elf", p.elf.string()},
+    j = {{"id", p.id},           {"name", p.name},         {"source", origin_name(p.origin)}, {"dir", os::to_utf8(p.dir)},
+         {"url", p.url},         {"env", p.env},           {"created", p.created},            {"elf", os::to_utf8(p.elf)},
          {"trusted", p.trusted}, {"has_source", p.origin != Origin::None}};
     j["last_settings"] = p.last_settings ? nlohmann::json(*p.last_settings) : nlohmann::json(nullptr);
 }
@@ -64,19 +64,12 @@ void to_json(nlohmann::json& j, const ProjectMeta& p) {
 ProjectStore::ProjectStore(fs::path root) : root_(std::move(root)) { fs::create_directories(root_); }
 
 fs::path ProjectStore::default_root() {
-    const char* home = std::getenv("HOME");
-#ifdef __APPLE__
-    // not under "Application Support": PlatformIO's ESP-IDF builder refuses a project path with a space, and clones live here
-    return fs::path(home ? home : ".") / ".malgrind/projects";
-#else
-    if (const char* xdg = std::getenv("XDG_DATA_HOME"); xdg && *xdg) return fs::path(xdg) / "malgrind/projects";
-    return fs::path(home ? home : ".") / ".local/share/malgrind/projects";
-#endif
+    return os::safe_projects_root();
 }
 
 std::optional<fs::path> ProjectStore::dir_of(std::string_view id) const {
     if (!valid_id(id)) return std::nullopt;
-    return root_ / std::string(id);
+    return root_ / os::from_utf8(id);
 }
 
 fs::path ProjectStore::clone_dir(std::string_view id) const {
@@ -89,7 +82,7 @@ ProjectMeta ProjectStore::create(ProjectMeta meta, const fs::path& elf) {
     fs::path dir;
     for (int n = 1;; ++n) { // create_directory is the atomic claim of an id
         meta.id = n == 1 ? base : std::format("{}-{}", base, n);
-        dir = root_ / meta.id;
+        dir = root_ / os::from_utf8(meta.id);
         if (fs::create_directory(dir)) break;
     }
     meta.created = utc_now("%Y-%m-%dT%H:%M:%SZ");

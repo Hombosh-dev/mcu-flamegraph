@@ -4,7 +4,9 @@
 
 #include "malgrind/profiler.hpp"
 
+#include <chrono>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 // `flushes` rounds of a 2-core Xtensa target = 2 * flushes frames. Per round: core 0 reports a <- b <- main three
@@ -21,4 +23,13 @@ inline std::vector<std::uint8_t> make_stream(unsigned flushes) {
         p.flush([&](const std::uint8_t* d, std::size_t n) { stream.insert(stream.end(), d, d + n); }, [] {}, 5000);
     }
     return stream;
+}
+
+template <class Pred>
+bool wait_for(Pred pred, std::chrono::milliseconds limit = std::chrono::milliseconds(3000)) {
+    using namespace std::chrono_literals;
+    for (const auto end = std::chrono::steady_clock::now() + limit; std::chrono::steady_clock::now() < end;
+         std::this_thread::sleep_for(10ms))
+        if (pred()) return true;
+    return false;
 }

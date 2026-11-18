@@ -1,6 +1,9 @@
 #pragma once
 
+#include "os/socket.hpp"
+
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -23,10 +26,12 @@ public:
     HttpServer(const HttpServer&) = delete;
     HttpServer& operator=(const HttpServer&) = delete;
 
+    [[nodiscard]] std::uint16_t port() const noexcept { return listener_.port(); }
+
 private:
     void serve();
 
-    int listen_fd_ = -1;
+    os::TcpListener listener_;
     Handler handler_;
     std::atomic<bool> stop_{false};
     std::thread thread_; // std::jthread is still experimental in Apple's libc++

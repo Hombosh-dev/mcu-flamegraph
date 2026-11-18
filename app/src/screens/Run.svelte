@@ -12,7 +12,7 @@
     run: RunMeta;
     live: boolean; // recording right now (false: a stored run)
     onClose(): void;
-    onRemoveAgent(port: string): void;
+    onRemoveAgent(device: string): void;
   }
   let { sidecar, run, live: startsLive, onClose, onRemoveAgent }: Props = $props();
 
@@ -167,7 +167,7 @@
           </select>
         </label>
       </div>
-      {#if live}<button class="remove" onclick={() => onRemoveAgent(run.port)}>Remove agent…</button>{/if}
+      {#if live}<button class="remove" onclick={() => onRemoveAgent(run.device_id || run.port)}>Remove agent…</button>{/if}
     </nav>
 
     <main>

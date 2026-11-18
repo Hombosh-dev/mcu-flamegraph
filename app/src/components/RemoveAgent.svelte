@@ -2,28 +2,34 @@
   import { onMount, untrack } from 'svelte';
   import BuildLog from './BuildLog.svelte';
   import type { Sidecar } from '../lib/sidecar';
-  import type { ProjectMeta } from '../lib/types';
+  import type { Device, DevicesInfo, ProjectMeta } from '../lib/types';
 
   interface Props {
     sidecar: Sidecar;
-    port: string; // the board to reflash; empty: choose among the serial ports found
+    device: string; // the board to reflash; empty: choose among the serial devices found
     onDone(): void;
     onCancel(): void;
   }
-  let { sidecar, port: given, onDone, onCancel }: Props = $props();
+  let { sidecar, device: given, onDone, onCancel }: Props = $props();
 
-  let port = $state(untrack(() => given));
-  let ports = $state<string[]>([]);
-  let portsKnown = $state(false);
+  let device = $state(untrack(() => given));
+  let devices = $state<Device[]>([]);
+  let devicesKnown = $state(false);
+
+  const selectedLabel = $derived.by(() => {
+    const found = devices.find((d) => d.id === device);
+    return found ? `${found.title || found.name} (${found.name})` : '';
+  });
 
   onMount(async () => {
     buildable = (await sidecar.call<ProjectMeta[]>('projects')).filter((p) => p.has_source && p.trusted && !p.problem);
     project = buildable[0]?.id ?? '';
-    if (!port) {
-      ports = await sidecar.call<string[]>('ports');
-      port = ports[0] ?? '';
+    if (!device) {
+      const info = await sidecar.call<DevicesInfo>('devices');
+      devices = info.devices.filter((d) => d.kind === 'serial');
+      device = devices[0]?.id ?? '';
     }
-    portsKnown = true;
+    devicesKnown = true;
   });
 
   let rebuild = $state(false); // false: write back the backup taken before the agent went on; true: build the user's project
@@ -41,7 +47,7 @@
     error = '';
     lines = [];
     try {
-      await sidecar.call('remove_agent', rebuild ? { how: 'rebuild', project, port } : { how: 'restore', port });
+      await sidecar.call('remove_agent', rebuild ? { how: 'rebuild', project, device } : { how: 'restore', device });
       onDone();
     } catch (e) {
       error = String(e instanceof Error ? e.message : e);
@@ -61,12 +67,16 @@
         profiling stops.
       {/if}
     </p>
-    {#if ports.length > 1}
-      <label class="muted">Port <select bind:value={port}>{#each ports as p}<option>{p}</option>{/each}</select></label>
-    {:else if port}
-      <p class="muted">Port <code>{port}</code></p>
-    {:else if portsKnown}
-      <p class="error" role="alert">No serial port found. Connect the board first.</p>
+    {#if devices.length > 1}
+      <label class="muted">Device
+        <select bind:value={device}>
+          {#each devices as d (d.id)}<option value={d.id}>{d.title || d.name} ({d.name})</option>{/each}
+        </select>
+      </label>
+    {:else if device}
+      <p class="muted">Device <code>{selectedLabel || device}</code></p>
+    {:else if devicesKnown}
+      <p class="error" role="alert">No serial device found. Connect the board first.</p>
     {/if}
     {#if rebuild}
       {#if buildable.length === 0}
@@ -81,7 +91,7 @@
     {#if started}<BuildLog {lines} busy={working} />{/if}
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     <div class="actions">
-      <button class="btn danger" disabled={(rebuild && !project) || !port || working} onclick={remove}>
+      <button class="btn danger" disabled={(rebuild && !project) || !device || working} onclick={remove}>
         {working ? 'Flashing…' : rebuild ? 'Rebuild & flash' : 'Restore & flash'}
       </button>
       <button class="btn ghost" disabled={working} onclick={onCancel}>Cancel</button>
